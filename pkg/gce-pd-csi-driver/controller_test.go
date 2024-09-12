@@ -16,6 +16,7 @@ package gceGCEDriver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -35,15 +36,16 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/klog/v2"
+	clock "k8s.io/utils/clock/testing"
 	"k8s.io/utils/strings/slices"
 
 	csi "github.com/container-storage-interface/spec/lib/go/csi"
 	"sigs.k8s.io/gcp-compute-persistent-disk-csi-driver/pkg/common"
 	gce "sigs.k8s.io/gcp-compute-persistent-disk-csi-driver/pkg/gce-cloud-provider/compute"
+	gcecloudprovider "sigs.k8s.io/gcp-compute-persistent-disk-csi-driver/pkg/gce-cloud-provider/compute"
 )
 
 const (
@@ -1519,7 +1521,45 @@ func TestMultiZoneVolumeCreation(t *testing.T) {
 		sortTopologies := func(t1, t2 *csi.Topology) bool {
 			return t1.Segments[common.TopologyKeyZone] < t2.Segments[common.TopologyKeyZone]
 		}
-		if diff := cmp.Diff(expVol, vol, cmpopts.SortSlices(sortTopologies)); diff != "" {
+
+		// Custom comparers to compare two volumes
+		contentSourceComparer := cmp.Comparer(func(a, b *csi.VolumeContentSource) bool {
+			if a == nil {
+				return b == nil
+			}
+			if b == nil {
+				return false
+			}
+			if vcsA, ok := a.Type.(*csi.VolumeContentSource_Snapshot); ok {
+				if vcsB, valid := b.Type.(*csi.VolumeContentSource_Snapshot); valid {
+					return vcsA.Snapshot.SnapshotId == vcsB.Snapshot.SnapshotId
+				}
+				return false
+			}
+			if vcsA, ok := a.Type.(*csi.VolumeContentSource_Volume); ok {
+				if vcsB, valid := b.Type.(*csi.VolumeContentSource_Volume); valid {
+					return vcsA.Volume.VolumeId == vcsB.Volume.VolumeId
+				}
+				return false
+			}
+			return false
+		})
+		topComparer := cmp.Comparer(func(a, b *csi.Topology) bool {
+			return cmp.Diff(a.Segments, b.Segments) == ""
+		})
+		volComparer := cmp.Comparer(func(a, b *csi.Volume) bool {
+			if a == nil {
+				return b == nil
+			}
+			if b == nil {
+				return false
+			}
+			topEqual := cmp.Diff(a.AccessibleTopology, b.AccessibleTopology, cmpopts.SortSlices(sortTopologies), topComparer) == ""
+			vcEqual := cmp.Diff(a.VolumeContext, b.VolumeContext) == ""
+			csEqual := cmp.Diff(a.ContentSource, b.ContentSource, contentSourceComparer) == ""
+			return a.CapacityBytes == b.CapacityBytes && a.VolumeId == b.VolumeId && vcEqual && topEqual && csEqual
+		})
+		if diff := cmp.Diff(expVol, vol, volComparer); diff != "" {
 			t.Errorf("Accessible topologies mismatch (-want +got):\n%s", diff)
 		}
 
@@ -1711,18 +1751,19 @@ func TestMultiZoneVolumeCreationErrHandling(t *testing.T) {
 		}
 	}
 }
+
 func TestCreateVolumeWithVolumeAttributeClassParameters(t *testing.T) {
 	// When volume attribute class specifies iops / throughput they should take precedence over storage class parameters
-
 	testCases := []struct {
 		name          string
 		req           *csi.CreateVolumeRequest
 		expIops       int64
 		expThroughput int64
-		expError      string
+		wantErr       bool
+		expErrCode    codes.Code
 	}{
 		{
-			name: "Volume attribute class parameters should take precedence over storage class parameters",
+			name: "VolumeAttributesClass parameters should take precedence over storage class parameters",
 			req: &csi.CreateVolumeRequest{
 				Name:          name,
 				CapacityRange: stdCapRange,
@@ -1739,7 +1780,7 @@ func TestCreateVolumeWithVolumeAttributeClassParameters(t *testing.T) {
 				Parameters: map[string]string{
 					common.ParameterKeyType:                          "hyperdisk-balanced",
 					common.ParameterKeyProvisionedIOPSOnCreate:       "10000",
-					common.ParameterKeyProvisionedThroughputOnCreate: "500",
+					common.ParameterKeyProvisionedThroughputOnCreate: "500Mi",
 				},
 				AccessibilityRequirements: &csi.TopologyRequirement{
 					Preferred: []*csi.Topology{
@@ -1752,10 +1793,10 @@ func TestCreateVolumeWithVolumeAttributeClassParameters(t *testing.T) {
 			},
 			expIops:       20000,
 			expThroughput: 600,
-			expError:      "",
+			wantErr:       false,
 		},
 		{
-			name: "Volume attribute class parameters should be ignored for incompatible disk types",
+			name: "VolumeAttributesClass parameters should throw an error for incompatible disk types",
 			req: &csi.CreateVolumeRequest{
 				Name:          "pd-ssd-vol",
 				CapacityRange: stdCapRange,
@@ -1770,9 +1811,9 @@ func TestCreateVolumeWithVolumeAttributeClassParameters(t *testing.T) {
 					},
 				},
 				Parameters: map[string]string{
-					common.ParameterKeyType: "pd-ssd",
-					// common.ParameterKeyProvisionedIOPSOnCreate:       "10000",
-					// common.ParameterKeyProvisionedThroughputOnCreate: "500",
+					common.ParameterKeyType:                          "pd-ssd",
+					common.ParameterKeyProvisionedIOPSOnCreate:       "10000",
+					common.ParameterKeyProvisionedThroughputOnCreate: "500Mi",
 				},
 				AccessibilityRequirements: &csi.TopologyRequirement{
 					Preferred: []*csi.Topology{
@@ -1785,7 +1826,8 @@ func TestCreateVolumeWithVolumeAttributeClassParameters(t *testing.T) {
 			},
 			expIops:       0,
 			expThroughput: 0,
-			expError:      "",
+			wantErr:       true,
+			expErrCode:    codes.InvalidArgument,
 		},
 	}
 
@@ -1801,6 +1843,12 @@ func TestCreateVolumeWithVolumeAttributeClassParameters(t *testing.T) {
 		createVolReq := tc.req
 
 		resp, err := gceDriver.cs.CreateVolume(context.Background(), createVolReq)
+		if tc.wantErr {
+			if status.Code(err) != tc.expErrCode {
+				t.Fatalf("Expected error code: %v, got: %v. err : %v", tc.expErrCode, status.Code(err), err)
+			}
+			continue
+		}
 		if err != nil {
 			t.Fatalf("Failed to create volume: %v", err)
 		}
@@ -1827,8 +1875,8 @@ func TestCreateVolumeWithVolumeAttributeClassParameters(t *testing.T) {
 	}
 
 }
-func TestVolumeModifyOperation(t *testing.T) {
 
+func TestVolumeModifyOperation(t *testing.T) {
 	testCases := []struct {
 		name          string
 		req           *csi.ControllerModifyVolumeRequest
@@ -1930,6 +1978,169 @@ func TestVolumeModifyOperation(t *testing.T) {
 		}
 	}
 }
+
+type FakeCloudProviderUpdateDiskErr struct {
+	*gce.FakeCloudProvider
+	updateDiskErrors map[string]error
+}
+
+func NewFakeCloudProviderUpdateDiskErr(project, zone string) (*FakeCloudProviderUpdateDiskErr, error) {
+	provider, err := gce.CreateFakeCloudProvider(project, zone, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &FakeCloudProviderUpdateDiskErr{
+		FakeCloudProvider: provider,
+		updateDiskErrors:  map[string]error{},
+	}, nil
+}
+
+func (cloud *FakeCloudProviderUpdateDiskErr) AddDiskForErr(volKey *meta.Key, err error) {
+	cloud.updateDiskErrors[volKey.String()] = err
+}
+
+func (cloud *FakeCloudProviderUpdateDiskErr) UpdateDisk(ctx context.Context, project string, volKey *meta.Key, existingDisk *gcecloudprovider.CloudDisk, params common.ModifyVolumeParameters) error {
+	if err, ok := cloud.updateDiskErrors[volKey.String()]; ok {
+		return err
+	}
+
+	return cloud.FakeCloudProvider.UpdateDisk(ctx, project, volKey, existingDisk, params)
+}
+
+type modifyVolumeErrorTest struct {
+	expErrCode int
+	wantReason bool
+	reason     string
+}
+
+func TestVolumeModifyErrorHandling(t *testing.T) {
+	testCases := []struct {
+		name               string
+		modifyVolumeErrors map[*meta.Key]error
+		createReq          *csi.CreateVolumeRequest
+		modifyReq          *csi.ControllerModifyVolumeRequest
+		expErr             *modifyVolumeErrorTest
+	}{
+		{
+			name:      "disk notFound errors",
+			modifyReq: &csi.ControllerModifyVolumeRequest{},
+			expErr: &modifyVolumeErrorTest{
+				wantReason: true,
+				reason:     "notFound",
+			},
+		},
+		{
+			name: "Too Many Requests errors",
+			createReq: &csi.CreateVolumeRequest{
+				Name: name,
+				Parameters: map[string]string{
+					common.ParameterKeyType:                          "hyperdisk-balanced",
+					common.ParameterKeyProvisionedIOPSOnCreate:       "3000",
+					common.ParameterKeyProvisionedThroughputOnCreate: "150Mi",
+				},
+				VolumeCapabilities: stdVolCaps,
+				AccessibilityRequirements: &csi.TopologyRequirement{
+					Requisite: []*csi.Topology{
+						{
+							Segments: map[string]string{common.TopologyKeyZone: "us-central1-a"},
+						},
+					},
+					Preferred: []*csi.Topology{
+						{
+							Segments: map[string]string{common.TopologyKeyZone: "us-central1-a"},
+						},
+					},
+				},
+			},
+			modifyReq: &csi.ControllerModifyVolumeRequest{
+				MutableParameters: map[string]string{"iops": "3001", "throughput": "151"},
+			},
+			modifyVolumeErrors: map[*meta.Key]error{
+				meta.ZonalKey(name, "us-central1-a"): &googleapi.Error{
+					Code:    http.StatusTooManyRequests,
+					Message: "too many IOPS/Throughput modifications in a 6 hour window",
+				},
+			},
+			expErr: &modifyVolumeErrorTest{
+				expErrCode: http.StatusTooManyRequests,
+			},
+		},
+		{
+			name: "InvalidArgument errors",
+			createReq: &csi.CreateVolumeRequest{
+				Name: name,
+				Parameters: map[string]string{
+					common.ParameterKeyType:                          "hyperdisk-balanced",
+					common.ParameterKeyProvisionedIOPSOnCreate:       "3000",
+					common.ParameterKeyProvisionedThroughputOnCreate: "150Mi",
+				},
+				VolumeCapabilities: stdVolCaps,
+				AccessibilityRequirements: &csi.TopologyRequirement{
+					Requisite: []*csi.Topology{
+						{
+							Segments: map[string]string{common.TopologyKeyZone: "us-central1-a"},
+						},
+					},
+					Preferred: []*csi.Topology{
+						{
+							Segments: map[string]string{common.TopologyKeyZone: "us-central1-a"},
+						},
+					},
+				},
+			},
+			modifyReq: &csi.ControllerModifyVolumeRequest{
+				MutableParameters: map[string]string{"iops": "10000", "throughput": "2400"},
+			},
+			modifyVolumeErrors: map[*meta.Key]error{
+				meta.ZonalKey(name, "us-central1-a"): &googleapi.Error{Code: int(codes.InvalidArgument), Message: "InvalidArgument"},
+			},
+			expErr: &modifyVolumeErrorTest{
+				expErrCode: int(codes.InvalidArgument),
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Logf("test case: %s", tc.name)
+		fcp, err := NewFakeCloudProviderUpdateDiskErr(project, zone)
+		if err != nil {
+			t.Fatalf("Failed to create mock cloud provider")
+		}
+		gceDriver := initGCEDriverWithCloudProvider(t, fcp)
+
+		for volKey, err := range tc.modifyVolumeErrors {
+			fcp.AddDiskForErr(volKey, err)
+		}
+
+		volId := testVolumeID
+		if tc.createReq != nil {
+			fmt.Printf("Creating volume")
+			resp, err := gceDriver.cs.CreateVolume(context.Background(), tc.createReq)
+			if err != nil {
+				t.Errorf("Expected no error, got %v", err)
+			}
+			volId = resp.GetVolume().VolumeId
+		}
+
+		tc.modifyReq.VolumeId = volId
+		_, err = gceDriver.cs.ControllerModifyVolume(context.Background(), tc.modifyReq)
+		if err == nil {
+			t.Errorf("Expected err: %v, got no error", tc.expErr.expErrCode)
+		}
+
+		var e *googleapi.Error
+		if ok := errors.As(err, &e); ok {
+			if e.Code != tc.expErr.expErrCode {
+				t.Errorf("Expected error: %v, got: %v", tc.expErr.expErrCode, e.Code)
+			}
+			if tc.expErr.wantReason && !googleapiErrContainsReason(e, tc.expErr.reason) {
+				t.Errorf("Expected error to contain reason %s", tc.expErr.reason)
+			}
+		} else {
+			t.Errorf("Expected error %v to be a googleapi error", err)
+		}
+	}
+}
+
 func TestListVolumePagination(t *testing.T) {
 	testCases := []struct {
 		name            string
@@ -2343,7 +2554,7 @@ func TestListVolumeResponse(t *testing.T) {
 	}
 }
 
-func entryToVolumeId(e csi.ListVolumesResponse_Entry) string {
+func entryToVolumeId(e *csi.ListVolumesResponse_Entry) string {
 	return e.Volume.VolumeId
 }
 
@@ -5102,4 +5313,13 @@ func isInternalError(err error) bool {
 	}
 
 	return st.Code().String() == "Internal"
+}
+
+func googleapiErrContainsReason(err *googleapi.Error, reason string) bool {
+	for _, errItem := range err.Errors {
+		if strings.Contains(errItem.Reason, reason) {
+			return true
+		}
+	}
+	return false
 }

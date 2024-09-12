@@ -461,26 +461,36 @@ func (cloud *CloudProvider) InsertDisk(ctx context.Context, project string, volK
 }
 
 func (cloud *CloudProvider) UpdateDisk(ctx context.Context, project string, volKey *meta.Key, existingDisk *CloudDisk, params common.ModifyVolumeParameters) error {
-
-	klog.V(5).Infof("Updating disk %v", volKey)
 	// hyperdisks are zonal disks
 	// pd-disks do not support modification of IOPS and Throughput
+	if volKey.Type() == meta.Regional {
+		return status.Error(codes.InvalidArgument, "Cannot update regional disk")
+	}
+	klog.V(5).Infof("Updating disk %v", volKey)
 	return cloud.updateZonalDisk(ctx, project, volKey, existingDisk, params)
 }
 
 func (cloud *CloudProvider) updateZonalDisk(ctx context.Context, project string, volKey *meta.Key, existingDisk *CloudDisk, params common.ModifyVolumeParameters) error {
-
-	if params.IOPS == 0 && params.Throughput == 0 {
+	specifiedIops := params.IOPS != nil && *params.IOPS != 0
+	specifiedThroughput := params.Throughput != nil && *params.Throughput != 0
+	if !specifiedIops && !specifiedThroughput {
 		return fmt.Errorf("no IOPS or Throughput specified for disk %v", existingDisk.GetSelfLink())
 	}
 	updatedDisk := &computev1.Disk{
-		Name:                  existingDisk.GetName(),
-		ProvisionedIops:       params.IOPS,
-		ProvisionedThroughput: params.Throughput,
+		Name: existingDisk.GetName(),
+	}
+	paths := []string{}
+	if params.IOPS != nil && *params.IOPS != 0 {
+		updatedDisk.ProvisionedIops = *params.IOPS
+		paths = append(paths, "provisionedIops")
+	}
+	if params.Throughput != nil && *params.Throughput != 0 {
+		updatedDisk.ProvisionedThroughput = *params.Throughput
+		paths = append(paths, "provisionedThroughput")
 	}
 
 	diskUpdateOp := cloud.service.Disks.Update(project, volKey.Zone, volKey.Name, updatedDisk)
-	diskUpdateOp.Paths("provisionedIops", "provisionedThroughput")
+	diskUpdateOp.Paths(paths...)
 	_, err := diskUpdateOp.Context(ctx).Do()
 
 	if err != nil {
@@ -555,6 +565,72 @@ func convertV1DiskToBetaDisk(v1Disk *computev1.Disk) *computebeta.Disk {
 	betaDisk.StoragePool = v1Disk.StoragePool
 
 	return betaDisk
+}
+
+func convertBetaCustomerEncryptionKeyToV1(betaKey *computebeta.CustomerEncryptionKey) *computev1.CustomerEncryptionKey {
+	return &computev1.CustomerEncryptionKey{
+		KmsKeyName:      betaKey.KmsKeyName,
+		RawKey:          betaKey.RawKey,
+		Sha256:          betaKey.Sha256,
+		ForceSendFields: betaKey.ForceSendFields,
+		NullFields:      betaKey.NullFields,
+	}
+}
+
+func convertBetaDiskParamsToV1(betaDiskParams *computebeta.DiskParams) *computev1.DiskParams {
+	resourceManagerTags := make(map[string]string)
+	for k, v := range betaDiskParams.ResourceManagerTags {
+		resourceManagerTags[k] = v
+	}
+	return &computev1.DiskParams{
+		ResourceManagerTags: resourceManagerTags,
+	}
+}
+func convertBetaDiskToV1Disk(betaDisk *computebeta.Disk) *computev1.Disk {
+	var dek *computev1.CustomerEncryptionKey = nil
+
+	if betaDisk.DiskEncryptionKey != nil {
+		dek = convertBetaCustomerEncryptionKeyToV1(betaDisk.DiskEncryptionKey)
+	}
+
+	var params *computev1.DiskParams = nil
+	if betaDisk.Params != nil {
+		params = convertBetaDiskParamsToV1(betaDisk.Params)
+	}
+
+	// Note: this is an incomplete list. It only includes the fields we use for disk creation.
+	v1Disk := &computev1.Disk{
+		Name:              betaDisk.Name,
+		SizeGb:            betaDisk.SizeGb,
+		Description:       betaDisk.Description,
+		Type:              betaDisk.Type,
+		SourceSnapshot:    betaDisk.SourceSnapshot,
+		SourceImage:       betaDisk.SourceImage,
+		SourceImageId:     betaDisk.SourceImageId,
+		SourceSnapshotId:  betaDisk.SourceSnapshotId,
+		SourceDisk:        betaDisk.SourceDisk,
+		ReplicaZones:      betaDisk.ReplicaZones,
+		DiskEncryptionKey: dek,
+		Zone:              betaDisk.Zone,
+		Region:            betaDisk.Region,
+		Status:            betaDisk.Status,
+		SelfLink:          betaDisk.SelfLink,
+		Params:            params,
+		AccessMode:        betaDisk.AccessMode,
+	}
+
+	// Hyperdisk doesn't currently support multiWriter (https://cloud.google.com/compute/docs/disks/hyperdisks#limitations),
+	// but if multiWriter + hyperdisk is supported in the future, we want the PDCSI driver to support this feature without
+	// any additional code change.
+	if betaDisk.ProvisionedIops > 0 {
+		v1Disk.ProvisionedIops = betaDisk.ProvisionedIops
+	}
+	if betaDisk.ProvisionedThroughput > 0 {
+		v1Disk.ProvisionedThroughput = betaDisk.ProvisionedThroughput
+	}
+	v1Disk.StoragePool = betaDisk.StoragePool
+
+	return v1Disk
 }
 
 func (cloud *CloudProvider) insertRegionalDisk(
@@ -1160,7 +1236,7 @@ func codeForGCEOpError(err computev1.OperationErrorErrors) codes.Code {
 		"RESOURCE_NOT_FOUND":                        codes.NotFound,
 		"RESOURCE_ALREADY_EXISTS":                   codes.AlreadyExists,
 		"RESOURCE_IN_USE_BY_ANOTHER_RESOURCE":       codes.InvalidArgument,
-		"OPERATION_CANCELED_BY_USER":                codes.Aborted,
+		"OPERATION_CANCELED_BY_USER":                codes.Canceled,
 		"QUOTA_EXCEEDED":                            codes.ResourceExhausted,
 		"ZONE_RESOURCE_POOL_EXHAUSTED":              codes.Unavailable,
 		"ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS": codes.Unavailable,

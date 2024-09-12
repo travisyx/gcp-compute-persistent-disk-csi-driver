@@ -1,4 +1,4 @@
-apiVersion: storage.k8s.io/v1alpha1
+apiVersion: storage.k8s.io/v1beta1
 kind: VolumeAttributesClass
 metadata:
   name: silver
@@ -7,7 +7,7 @@ parameters:
   throughput: "350"
   iops: "6000"
 ---
-apiVersion: storage.k8s.io/v1alpha1
+apiVersion: storage.k8s.io/v1beta1
 kind: VolumeAttributesClass
 metadata:
   name: gold
@@ -21,7 +21,7 @@ kind: StorageClass
 metadata:
   name: balanced
 provisioner: pd.csi.storage.gke.io
-allowVolumeExpansion: true 
+allowVolumeExpansion: true
 volumeBindingMode: WaitForFirstConsumer
 parameters:
   type: hyperdisk-balanced

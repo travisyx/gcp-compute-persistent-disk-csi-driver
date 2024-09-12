@@ -488,9 +488,11 @@ func TestExtractModifyVolumeParameters(t *testing.T) {
 		"throughput": "500",
 	}
 
+	iops := int64(1000)
+	throughput := int64(500)
 	expected := ModifyVolumeParameters{
-		IOPS:       1000,
-		Throughput: 500,
+		IOPS:       &iops,
+		Throughput: &throughput,
 	}
 
 	result, err := ExtractModifyVolumeParameters(parameters)
@@ -499,6 +501,6 @@ func TestExtractModifyVolumeParameters(t *testing.T) {
 	}
 
 	if !reflect.DeepEqual(result, expected) {
-		t.Errorf("Expected: %v, but got: %v", expected, result)
+		t.Errorf("Got ExtractModifyVolumeParameters(%+v) = %+v; want: %v", parameters, result, expected)
 	}
 }
