@@ -1597,7 +1597,8 @@ var _ = Describe("GCE PD CSI Driver", func() {
 			err = client.ControllerModifyVolume(volId, mutableParams)
 			Expect(err).To(BeNil(), "Expected ControllerModifyVolume to succeed")
 
-			waitForMetadataUpdate(6, p, z, volName, initialIops, initialThroughput, context.Background())
+			err = waitForMetadataUpdate(6, p, z, volName, initialIops, initialThroughput)
+			Expect(err).To(BeNil(), "Expected ControllerModifyVolume to update metadata")
 
 			// Assert ControllerModifyVolume successfully updated metadata
 			disk, err := computeService.Disks.Get(p, z, volName).Do()
@@ -1894,23 +1895,30 @@ func stringPtr(str string) *string {
 	return &str
 }
 
-// waitForMetadataUpdate tries to poll every minute until numMinutes and tests if IOPS/throughput are updated. Returns true if the metadata is updated
-func waitForMetadataUpdate(numMinutes int, project, zone, volName string, initialIops *string, initialThroughput *string, ctx context.Context) bool {
-	return Eventually(ctx, time.Duration(numMinutes)*time.Minute, 1*time.Minute, func(ctx context.Context) bool {
+// waitForMetadataUpdate tries to poll every minute until numMinutes and tests if IOPS/throughput are updated
+func waitForMetadataUpdate(numMinutes int, project, zone, volName string, initialIops *string, initialThroughput *string) error {
+	backoff := wait.Backoff{
+		Duration: 1 * time.Minute,
+		Factor:   1.0,
+		Steps:    numMinutes,
+		Cap:      time.Duration(numMinutes) * time.Minute,
+	}
+	err := wait.ExponentialBackoffWithContext(context.Background(), backoff, func() (bool, error) {
 		disk, err := computeService.Disks.Get(project, zone, volName).Do()
 		if err != nil {
-			return false
+			return false, nil
 		}
 		if initialIops != nil && strconv.FormatInt(disk.ProvisionedIops, 10) != *initialIops {
-			return true
+			return true, nil
 		}
 		if initialThroughput != nil {
 			throughput := *initialThroughput
 			// Strip "Mi" from throughput
 			if len(throughput) > 2 && strconv.FormatInt(disk.ProvisionedThroughput, 10) != throughput[:len(throughput)-2] {
-				return true
+				return true, nil
 			}
 		}
-		return false
-	}).Should(BeTrue())
+		return false, nil
+	})
+	return err
 }
