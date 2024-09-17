@@ -1561,7 +1561,7 @@ var _ = Describe("GCE PD CSI Driver", func() {
 		Entry("with unsupported disk-type pd-extreme", multiZoneTestConfig{diskType: extremeDiskType, readOnly: true, hasMultiZoneLabel: true, wantErrSubstring: "points to disk with unsupported disk type"}),
 	)
 
-	// Mark tests as pending while VACs are in beta
+	// Mark tests as pending while VolumeAttributesClasses are in beta
 	PDescribeTable("Should update metadata when providing valid metadata",
 		func(
 			diskType string,
