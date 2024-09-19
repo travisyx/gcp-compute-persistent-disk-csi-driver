@@ -16,4 +16,10 @@ if hostname | grep -q c.googlers.com ; then
   CLOUDTOP_HOST=--cloudtop-host
 fi
 
-ginkgo --v "test/e2e/tests" -- --project "${PROJECT}" --service-account "${IAM_NAME}" "${CLOUDTOP_HOST}" --v=6 --logtostderr $@
+GIT_TAG=
+if $(command -v git > /dev/null); then
+  # Get the most recent tag version relative to the current state
+  GIT_TAG=$(git describe --abbrev=0 --tags)
+fi
+
+ginkgo --v "test/e2e/tests" -- --project "${PROJECT}" --service-account "${IAM_NAME}" "${CLOUDTOP_HOST}" --git-tag "${GIT_TAG}" --v=6 --logtostderr $@

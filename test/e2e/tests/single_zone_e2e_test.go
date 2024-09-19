@@ -1562,7 +1562,7 @@ var _ = Describe("GCE PD CSI Driver", func() {
 	)
 
 	// Mark tests as pending while VolumeAttributesClasses are in beta
-	PDescribeTable("Should update metadata when providing valid metadata",
+	DescribeTable("Should update metadata when providing valid metadata",
 		func(
 			diskType string,
 			diskSize int64,
@@ -1571,6 +1571,10 @@ var _ = Describe("GCE PD CSI Driver", func() {
 			updatedIops *string,
 			updatedThroughput *string,
 		) {
+			// ControllerModifyVolume is introduced in v1.15.0, so skip tests otherwise
+			if len(*gitTag) == 0 || *gitTag < "v1.15.0" {
+				Skip("Not running ControllerModifyVolume tests, as the current git tag is below v1.15.0.")
+			}
 			Expect(testContexts).ToNot(BeEmpty())
 			testContext := getRandomTestContext()
 

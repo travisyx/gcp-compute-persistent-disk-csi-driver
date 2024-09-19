@@ -49,6 +49,7 @@ var (
 	cloudtopHost              = flag.Bool("cloudtop-host", false, "The local host is cloudtop, a kind of googler machine with special requirements to access GCP")
 	extraDriverFlags          = flag.String("extra-driver-flags", "", "Extra flags to pass to the driver")
 	enableConfidentialCompute = flag.Bool("enable-confidential-compute", false, "Create VMs with confidential compute mode. This uses NVMe devices")
+	gitTag                    = flag.String("git-tag", "", "The most recent tag relative to the current commit. Used to generate test skips.")
 
 	testContexts        = []*remote.TestContext{}
 	computeService      *compute.Service
