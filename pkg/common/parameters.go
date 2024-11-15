@@ -19,6 +19,8 @@ package common
 import (
 	"fmt"
 	"strings"
+
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -343,10 +345,12 @@ func ExtractModifyVolumeParameters(parameters map[string]string) (ModifyVolumePa
 			}
 			modifyVolumeParams.IOPS = &iops
 		case "throughput":
+			klog.V(5).Infof("arst the throughput value is: %s\n", value)
 			throughput, err := ConvertMiStringToInt64(value)
 			if err != nil {
 				return ModifyVolumeParameters{}, fmt.Errorf("parameters contain invalid throughput parameter: %w", err)
 			}
+			klog.V(5).Infof("arst the throughput value is: %d\n", throughput)
 			modifyVolumeParams.Throughput = &throughput
 		default:
 			return ModifyVolumeParameters{}, fmt.Errorf("parameters contain unknown parameter: %s", key)

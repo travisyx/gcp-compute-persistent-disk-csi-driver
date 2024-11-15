@@ -357,12 +357,14 @@ func (gceCS *GCEControllerServer) createVolumeInternal(ctx context.Context, req 
 			if !supportsIopsChange {
 				return nil, status.Errorf(codes.InvalidArgument, "Cannot specify IOPS for disk type %s", params.DiskType)
 			}
+			klog.V(4).Infof("The IOPS are: %d\n", *p.IOPS)
 			params.ProvisionedIOPSOnCreate = *p.IOPS
 		}
 		if p.Throughput != nil {
 			if !supportsThroughputChange {
 				return nil, status.Errorf(codes.InvalidArgument, "Cannot specify throughput for disk type %s", params.DiskType)
 			}
+			klog.V(4).Infof("The throughput are: %d\n", *p.Throughput)
 			params.ProvisionedThroughputOnCreate = *p.Throughput
 		}
 	}
@@ -803,7 +805,13 @@ func (gceCS *GCEControllerServer) ControllerModifyVolume(ctx context.Context, re
 		err = status.Errorf(codes.InvalidArgument, "Invalid parameters: %v", err)
 		return nil, err
 	}
-	klog.V(4).Infof("Modify Volume Parameters for %s: %v", volumeID, volumeModifyParams)
+	// klog.V(4).Infof("Modify Volume Parameters for %s: %v", volumeID, volumeModifyParams)
+	if volumeModifyParams.IOPS != nil {
+		klog.V(4).Infof("IOPS Modify Volume Parameters for %s: %d\n", volumeID, *volumeModifyParams.IOPS)
+	}
+	if volumeModifyParams.Throughput != nil {
+		klog.V(4).Infof("Throughput Modify Volume Parameters for %s: %d\n", volumeID, *volumeModifyParams.Throughput)
+	}
 
 	existingDisk, err := gceCS.CloudProvider.GetDisk(ctx, project, volKey, gce.GCEAPIVersionBeta)
 

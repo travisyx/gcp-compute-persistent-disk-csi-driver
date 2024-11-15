@@ -41,7 +41,7 @@ spec:
         - name: gce-pd-driver
           # Don't change base image without changing pdImagePlaceholder in
           # test/k8s-integration/main.go
-          image: gke.gcr.io/gcp-compute-persistent-disk-csi-driver
+          image: us-central1-docker.pkg.dev/travisx-joonix/csi-dev/gce-pd-csi-driver:dev
           args:
             - "--v=5"
             - "--endpoint=unix:/csi/csi.sock"
